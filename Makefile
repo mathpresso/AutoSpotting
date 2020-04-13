@@ -3,7 +3,7 @@ DEPS := "wget git go docker golint zip"
 BINARY := AutoSpotting
 
 COVER_PROFILE := /tmp/coverage.out
-BUCKET_NAME ?= cloudprowess
+BUCKET_NAME ?= mathpresso-infra/autospotting
 FLAVOR ?= custom
 LOCAL_PATH := build/s3/$(FLAVOR)
 LICENSE_FILES := LICENSE THIRDPARTY
