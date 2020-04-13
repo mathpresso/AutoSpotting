@@ -15,17 +15,20 @@ import (
 	"github.com/aws/aws-sdk-go/service/cloudformation/cloudformationiface"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
+	"github.com/aws/aws-sdk-go/service/elasticbeanstalk"
+	"github.com/aws/aws-sdk-go/service/elasticbeanstalk/elasticbeanstalkiface"
 	"github.com/aws/aws-sdk-go/service/lambda"
 	"github.com/aws/aws-sdk-go/service/lambda/lambdaiface"
 )
 
 type connections struct {
-	session        *session.Session
-	autoScaling    autoscalingiface.AutoScalingAPI
-	ec2            ec2iface.EC2API
-	cloudFormation cloudformationiface.CloudFormationAPI
-	lambda         lambdaiface.LambdaAPI
-	region         string
+	session          *session.Session
+	autoScaling      autoscalingiface.AutoScalingAPI
+	ec2              ec2iface.EC2API
+	cloudFormation   cloudformationiface.CloudFormationAPI
+	lambda           lambdaiface.LambdaAPI
+	elasticBeanstalk elasticbeanstalkiface.ElasticBeanstalkAPI
+	region           string
 }
 
 func (c *connections) setSession(region string) {
@@ -45,13 +48,20 @@ func (c *connections) connect(region string) {
 	ec2Conn := make(chan *ec2.EC2)
 	cloudformationConn := make(chan *cloudformation.CloudFormation)
 	lambdaConn := make(chan *lambda.Lambda)
+	elasticBeanstalkConn := make(chan *elasticbeanstalk.ElasticBeanstalk)
 
 	go func() { asConn <- autoscaling.New(c.session) }()
 	go func() { ec2Conn <- ec2.New(c.session) }()
 	go func() { lambdaConn <- lambda.New(c.session) }()
 	go func() { cloudformationConn <- cloudformation.New(c.session) }()
+	go func() { elasticBeanstalkConn <- elasticbeanstalk.New(c.session) }()
 
-	c.autoScaling, c.ec2, c.cloudFormation, c.lambda, c.region = <-asConn, <-ec2Conn, <-cloudformationConn, <-lambdaConn, region
+	c.autoScaling = <-asConn
+	c.ec2 = <-ec2Conn
+	c.cloudFormation = <-cloudformationConn
+	c.elasticBeanstalk = <-elasticBeanstalkConn
+	c.lambda = <-lambdaConn
+	c.region = region
 
 	debug.Println("Created service connections in", region)
 }

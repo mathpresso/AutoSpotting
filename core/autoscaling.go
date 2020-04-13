@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/elasticbeanstalk"
 	"github.com/aws/aws-sdk-go/service/lambda"
 )
 
@@ -225,8 +226,39 @@ func (a *autoScalingGroup) licensedToRun() (bool, error) {
 	return true, nil
 }
 
-func (a *autoScalingGroup) cronEventAction() runer {
+func (a *autoScalingGroup) isBeanstalkReady() error {
+	var envID *string
+	for _, tag := range a.Tags {
+		if *tag.Key == "elasticbeanstalk:environment-id" {
+			envID = tag.Value
+			break
+		}
+	}
+	if envID == nil {
+		// Not a beanstalk ASG
+		return nil
+	}
 
+	resp, err := a.region.services.elasticBeanstalk.DescribeEnvironments(
+		&elasticbeanstalk.DescribeEnvironmentsInput{
+			EnvironmentIds: []*string{envID},
+		},
+	)
+	if err != nil {
+		logger.Println(err.Error())
+		return err
+	}
+	if len(resp.Environments) != 1 {
+		return fmt.Errorf("could not fetch environment info for %s", *envID)
+	}
+	if *resp.Environments[0].Status != elasticbeanstalk.EnvironmentStatusReady {
+		return fmt.Errorf("environment %s is not ready: %s", *envID, *resp.Environments[0].Status)
+	}
+
+	return nil
+}
+
+func (a *autoScalingGroup) cronEventAction() runer {
 	a.scanInstances()
 	a.loadDefaultConfig()
 	a.loadConfigFromTags()
@@ -247,6 +279,11 @@ func (a *autoScalingGroup) cronEventAction() runer {
 	if licensed, err := a.licensedToRun(); !licensed {
 		logger.Println(a.region.name, a.name, "Skipping group, license limit reached:", err.Error())
 		return skipRun{reason: "over-license"}
+	}
+
+	if err := a.isBeanstalkReady(); err != nil {
+		logger.Println(a.region.name, a.name, "Skipping group, elasticbeanstalk not ready:", err.Error())
+		return
 	}
 
 	if spotInstance == nil {
