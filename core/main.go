@@ -22,7 +22,11 @@ import (
 	ec2instancesinfo "github.com/cristim/ec2-instances-info"
 )
 
-var logger, debug *log.Logger
+var (
+	// Set up default loggers, will be overriden by setupLogging() usually.
+	logger = log.New(os.Stderr, "", log.LstdFlags)
+	debug  = log.New(os.Stderr, "", log.LstdFlags)
+)
 
 // AutoSpotting hosts global configuration and has as methods all the public
 // entrypoints of this library
