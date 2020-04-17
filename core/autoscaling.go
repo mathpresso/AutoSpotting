@@ -207,6 +207,15 @@ func (a *autoScalingGroup) calculateHourlySavings() float64 {
 	return savings
 }
 
+func (a *autoScalingGroup) getBeanstalkEnvID() string {
+	for _, tag := range a.Tags {
+		if *tag.Key == "elasticbeanstalk:environment-id" {
+			return *tag.Value
+		}
+	}
+	return ""
+}
+
 func (a *autoScalingGroup) licensedToRun() (bool, error) {
 	defer as.savingsMutex.Unlock()
 	as.savingsMutex.Lock()
@@ -227,21 +236,15 @@ func (a *autoScalingGroup) licensedToRun() (bool, error) {
 }
 
 func (a *autoScalingGroup) isBeanstalkReady() error {
-	var envID *string
-	for _, tag := range a.Tags {
-		if *tag.Key == "elasticbeanstalk:environment-id" {
-			envID = tag.Value
-			break
-		}
-	}
-	if envID == nil {
+	envID := a.getBeanstalkEnvID()
+	if envID == "" {
 		// Not a beanstalk ASG
 		return nil
 	}
 
 	resp, err := a.region.services.elasticBeanstalk.DescribeEnvironments(
 		&elasticbeanstalk.DescribeEnvironmentsInput{
-			EnvironmentIds: []*string{envID},
+			EnvironmentIds: []*string{&envID},
 		},
 	)
 	if err != nil {
@@ -249,13 +252,46 @@ func (a *autoScalingGroup) isBeanstalkReady() error {
 		return err
 	}
 	if len(resp.Environments) != 1 {
-		return fmt.Errorf("could not fetch environment info for %s", *envID)
+		return fmt.Errorf("could not fetch environment info for %s", envID)
 	}
 	if *resp.Environments[0].Status != elasticbeanstalk.EnvironmentStatusReady {
-		return fmt.Errorf("environment %s is not ready: %s", *envID, *resp.Environments[0].Status)
+		return fmt.Errorf("environment %s is not ready: %s", envID, *resp.Environments[0].Status)
 	}
 
 	return nil
+}
+
+func (a *autoScalingGroup) spotDeploymentMatches(spot *instance) bool {
+	envID := a.getBeanstalkEnvID()
+	if envID == "" {
+		// Not a beanstalk ASG
+		return true
+	}
+
+	resp, err := a.region.services.elasticBeanstalk.DescribeInstancesHealth(
+		&elasticbeanstalk.DescribeInstancesHealthInput{
+			EnvironmentId: &envID,
+			AttributeNames: []*string{
+				aws.String("HealthStatus"),
+				aws.String("Deployment"),
+			},
+		},
+	)
+	if err != nil {
+		logger.Printf("error fetching instance health for %s: %v", envID, err)
+		return false
+	}
+
+	var spotDepID int64
+	seenDepIDs := make(map[int64]bool)
+	for _, inst := range resp.InstanceHealthList {
+		seenDepIDs[*inst.Deployment.DeploymentId] = true
+		if *inst.InstanceId == *spot.InstanceId {
+			spotDepID[*spot.InstanceId] = *inst.Deployment.DeploymentId
+		}
+	}
+
+	return false
 }
 
 func (a *autoScalingGroup) cronEventAction() runer {
@@ -312,7 +348,7 @@ func (a *autoScalingGroup) cronEventAction() runer {
 	spotInstanceID := *spotInstance.InstanceId
 	logger.Println("Found unattached spot instance", spotInstanceID)
 
-	if need, total := a.needReplaceOnDemandInstances(); !need || !shouldRun {
+	if need, total := a.needReplaceOnDemandInstances(); !a.spotDeploymentMatches(spotInstance) || !need || !shouldRun {
 		// add to FinalRecap
 		recapText := fmt.Sprintf("%s Terminated spot instance %s [not needed]", a.name, spotInstanceID)
 		a.region.conf.FinalRecap[a.region.name] = append(a.region.conf.FinalRecap[a.region.name], recapText)
