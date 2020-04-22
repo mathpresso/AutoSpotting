@@ -261,37 +261,64 @@ func (a *autoScalingGroup) isBeanstalkReady() error {
 	return nil
 }
 
-func (a *autoScalingGroup) spotDeploymentMatches(spot *instance) bool {
+func (a *autoScalingGroup) spotDeploymentMatches(spot *instance) (bool, error) {
 	envID := a.getBeanstalkEnvID()
 	if envID == "" {
 		// Not a beanstalk ASG
-		return true
+		return true, nil
 	}
 
-	resp, err := a.region.services.elasticBeanstalk.DescribeInstancesHealth(
-		&elasticbeanstalk.DescribeInstancesHealthInput{
-			EnvironmentId: &envID,
-			AttributeNames: []*string{
-				aws.String("HealthStatus"),
-				aws.String("Deployment"),
-			},
-		},
-	)
-	if err != nil {
-		logger.Printf("error fetching instance health for %s: %v", envID, err)
-		return false
-	}
-
-	var spotDepID int64
+	var nextToken *string
+	var spotDepID int64 = -1
 	seenDepIDs := make(map[int64]bool)
-	for _, inst := range resp.InstanceHealthList {
-		seenDepIDs[*inst.Deployment.DeploymentId] = true
-		if *inst.InstanceId == *spot.InstanceId {
-			spotDepID[*spot.InstanceId] = *inst.Deployment.DeploymentId
+	for {
+		resp, err := a.region.services.elasticBeanstalk.DescribeInstancesHealth(
+			&elasticbeanstalk.DescribeInstancesHealthInput{
+				EnvironmentId: &envID,
+				AttributeNames: []*string{
+					aws.String("Deployment"),
+				},
+				NextToken: nextToken,
+			},
+		)
+		if err != nil {
+			logger.Printf("error fetching instance health for %s: %v", envID, err)
+			return false, err
+		}
+		nextToken = resp.NextToken
+
+		for _, inst := range resp.InstanceHealthList {
+			if inst != nil && inst.Deployment != nil && inst.Deployment.DeploymentId != nil {
+				seenDepIDs[*inst.Deployment.DeploymentId] = true
+				if *inst.InstanceId == *spot.InstanceId {
+					spotDepID = *inst.Deployment.DeploymentId
+					break
+				}
+			}
+		}
+
+		if nextToken == nil {
+			break
 		}
 	}
 
-	return false
+	if spotDepID == -1 {
+		return false, fmt.Errorf("beanstalk deployment ID not found for %s %s", envID, *spot.InstanceId)
+	}
+	delete(seenDepIDs, spotDepID)
+
+	if len(seenDepIDs) > 0 {
+		var depIDs []int64
+		for id := range seenDepIDs {
+			depIDs = append(depIDs, id)
+		}
+		logger.Printf("there are other deployment IDs for %s: spot is %d: %v",
+			envID, spotDepID, depIDs)
+		return false, nil
+	}
+
+	logger.Printf("deployment ID matches for %s: %s", envID, *spot.InstanceId)
+	return true, nil
 }
 
 func (a *autoScalingGroup) cronEventAction() runer {
@@ -348,7 +375,12 @@ func (a *autoScalingGroup) cronEventAction() runer {
 	spotInstanceID := *spotInstance.InstanceId
 	logger.Println("Found unattached spot instance", spotInstanceID)
 
-	if need, total := a.needReplaceOnDemandInstances(); !a.spotDeploymentMatches(spotInstance) || !need || !shouldRun {
+	spotDepOk, err := a.spotDeploymentMatches(spotInstance)
+	if err != nil {
+		logger.Println(err)
+	}
+
+	if need, total := a.needReplaceOnDemandInstances(); (!spotDepOk && err != nil) || !need || !shouldRun {
 		// add to FinalRecap
 		recapText := fmt.Sprintf("%s Terminated spot instance %s [not needed]", a.name, spotInstanceID)
 		a.region.conf.FinalRecap[a.region.name] = append(a.region.conf.FinalRecap[a.region.name], recapText)
@@ -360,7 +392,7 @@ func (a *autoScalingGroup) cronEventAction() runer {
 			}}
 	}
 
-	if !spotInstance.isReadyToAttach(a) {
+	if (!spotDepOk && err != nil) || !spotInstance.isReadyToAttach(a) {
 		logger.Printf("Spot instance %s not yet ready, waiting for next run while processing %s",
 			spotInstanceID,
 			a.name)
