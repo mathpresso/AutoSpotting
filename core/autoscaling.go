@@ -346,7 +346,7 @@ func (a *autoScalingGroup) cronEventAction() runer {
 
 	if err := a.isBeanstalkReady(); err != nil {
 		logger.Println(a.region.name, a.name, "Skipping group, elasticbeanstalk not ready:", err.Error())
-		return
+		return skipRun{reason: "eb-not-ready"}
 	}
 
 	if spotInstance == nil {
